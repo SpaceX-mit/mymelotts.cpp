@@ -38,7 +38,7 @@ int main(int argc, char* argv[]) {
     float speed = 1.0f;
     int speaker_id = 0;
     int sample_rate = 24000;
-    bool verbose = false;
+    bool verbose = true;
     
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
