@@ -1,4 +1,3 @@
-
 // AudioFile.h - 简化版音频文件处理类
 
 #pragma once
@@ -9,6 +8,12 @@
 #include <iostream>
 #include <cmath>
 #include <algorithm>
+
+// 自定义clamp函数（如果不使用C++17）
+template<typename T>
+T clamp(const T& value, const T& low, const T& high) {
+    return std::max(low, std::min(value, high));
+}
 
 template <class T>
 class AudioFile {
@@ -61,13 +66,13 @@ public:
         
         // WAV文件头部结构
         struct WavHeader {
-            // RIFF头
-            char riff[4] = {"RIFF"};
+            // RIFF头 - 使用字符数组初始化，避免包含隐式空终止符
+            char riff[4] = {'R', 'I', 'F', 'F'};
             uint32_t chunk_size;
-            char wave[4] = {"WAVE"};
+            char wave[4] = {'W', 'A', 'V', 'E'};
             
             // fmt子块
-            char fmt[4] = {"fmt "};
+            char fmt[4] = {'f', 'm', 't', ' '};
             uint32_t fmt_size = 16;
             uint16_t audio_format = 1; // PCM
             uint16_t num_channels;
@@ -77,7 +82,7 @@ public:
             uint16_t bits_per_sample;
             
             // data子块
-            char data[4] = {"data"};
+            char data[4] = {'d', 'a', 't', 'a'};
             uint32_t data_size;
         };
         
@@ -101,7 +106,7 @@ public:
                 for (int channel = 0; channel < numChannels; channel++) {
                     // 将浮点数样本转换为16位整数
                     T sample = audioData[channel][i];
-                    sample = std::clamp(sample, static_cast<T>(-1.0), static_cast<T>(1.0));
+                    sample = clamp(sample, static_cast<T>(-1.0), static_cast<T>(1.0));
                     sample16 = static_cast<int16_t>(sample * 32767.0);
                     
                     file.write(reinterpret_cast<const char*>(&sample16), 2);
@@ -112,7 +117,7 @@ public:
                 for (int channel = 0; channel < numChannels; channel++) {
                     // 将浮点数样本转换为24位整数
                     T sample = audioData[channel][i];
-                    sample = std::clamp(sample, static_cast<T>(-1.0), static_cast<T>(1.0));
+                    sample = clamp(sample, static_cast<T>(-1.0), static_cast<T>(1.0));
                     int32_t sample24 = static_cast<int32_t>(sample * 8388607.0);
                     
                     uint8_t bytes[3];
@@ -127,10 +132,11 @@ public:
             int32_t sample32;
             
             for (int i = 0; i < numSamples; i++) {
+                // 修复循环变量错误：使用 channel 而不是 i
                 for (int channel = 0; channel < numChannels; channel++) {
                     // 将浮点数样本转换为32位整数
                     T sample = audioData[channel][i];
-                    sample = std::clamp(sample, static_cast<T>(-1.0), static_cast<T>(1.0));
+                    sample = clamp(sample, static_cast<T>(-1.0), static_cast<T>(1.0));
                     sample32 = static_cast<int32_t>(sample * 2147483647.0);
                     
                     file.write(reinterpret_cast<const char*>(&sample32), 4);
@@ -150,4 +156,3 @@ private:
     int sampleRate;  // 采样率
     int bitDepth;    // 位深度
 };
-

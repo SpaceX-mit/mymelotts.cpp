@@ -1,5 +1,4 @@
-// acoustic_model.cpp - 声学模型实现
-#include "text_processor.h"
+#include "acoustic_model.h"
 #include <onnxruntime_cxx_api.h>
 #include <fstream>
 #include <iostream>
@@ -28,16 +27,20 @@ AcousticModel::AcousticModel(const std::string& model_path) {
     size_t num_input_nodes = static_cast<Ort::Session*>(session_)->GetInputCount();
     size_t num_output_nodes = static_cast<Ort::Session*>(session_)->GetOutputCount();
     
+    // Get input and output names
+    input_names_.resize(num_input_nodes);
+    output_names_.resize(num_output_nodes);
+    
+    // 获取输入名称
     for (size_t i = 0; i < num_input_nodes; i++) {
-        auto input_name = static_cast<Ort::Session*>(session_)->GetInputName(i, allocator);
-        input_names_.push_back(input_name);
-        allocator.Free(input_name);
+        Ort::AllocatedStringPtr input_name_ptr = static_cast<Ort::Session*>(session_)->GetInputNameAllocated(i, allocator);
+        input_names_[i] = input_name_ptr.get();
     }
     
+    // 获取输出名称
     for (size_t i = 0; i < num_output_nodes; i++) {
-        auto output_name = static_cast<Ort::Session*>(session_)->GetOutputName(i, allocator);
-        output_names_.push_back(output_name);
-        allocator.Free(output_name);
+        Ort::AllocatedStringPtr output_name_ptr = static_cast<Ort::Session*>(session_)->GetOutputNameAllocated(i, allocator);
+        output_names_[i] = output_name_ptr.get();
     }
     
     // 加载音素表
@@ -118,106 +121,12 @@ std::vector<float> AcousticModel::forward(
     // 运行推理
     std::vector<const char*> input_names_ptr;
     for (const auto& name : input_names_) {
-        input_names_ptr.push_back(name);
+        input_names_ptr.push_back(name.c_str());
     }
     
     std::vector<const char*> output_names_ptr;
     for (const auto& name : output_names_) {
-        output_names_ptr.push_back(name);
-    }
-    
-    auto output_tensors = static_cast<Ort::Session*>(session_)->Run(
-        Ort::RunOptions{nullptr}, 
-        input_names_ptr.data(), 
-        inputs.data(), 
-        inputs.size(), 
-        output_names_ptr.data(), 
-        output_names_ptr.size()
-    );
-    
-    // 获取输出
-    float* output_data = output_tensors[0].GetTensorMutableData<float>();
-    auto tensor_info = output_tensors[0].GetTensorTypeAndShapeInfo();
-    auto output_shape = tensor_info.GetShape();
-    size_t output_size = tensor_info.GetElementCount();
-    
-    // 复制结果
-    std::vector<float> result(output_data, output_data + output_size);
-    return result;
-}
-
-// Vocoder构造函数
-Vocoder::Vocoder(const std::string& model_path) {
-    // 创建ONNX Runtime环境
-    Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "Vocoder");
-    env_ = new Ort::Env(std::move(env));
-    
-    // 会话选项
-    Ort::SessionOptions session_options;
-    session_options.SetIntraOpNumThreads(1);
-    session_options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_EXTENDED);
-    
-    // 创建会话
-    session_ = new Ort::Session(*(static_cast<Ort::Env*>(env_)), model_path.c_str(), session_options);
-    
-    // 获取模型信息
-    Ort::AllocatorWithDefaultOptions allocator;
-    
-    // 设置输入输出名
-    size_t num_input_nodes = static_cast<Ort::Session*>(session_)->GetInputCount();
-    size_t num_output_nodes = static_cast<Ort::Session*>(session_)->GetOutputCount();
-    
-    for (size_t i = 0; i < num_input_nodes; i++) {
-        auto input_name = static_cast<Ort::Session*>(session_)->GetInputName(i, allocator);
-        input_names_.push_back(input_name);
-        allocator.Free(input_name);
-    }
-    
-    for (size_t i = 0; i < num_output_nodes; i++) {
-        auto output_name = static_cast<Ort::Session*>(session_)->GetOutputName(i, allocator);
-        output_names_.push_back(output_name);
-        allocator.Free(output_name);
-    }
-}
-
-// 析构函数
-Vocoder::~Vocoder() {
-    delete static_cast<Ort::Session*>(session_);
-    delete static_cast<Ort::Env*>(env_);
-}
-
-// 前向推理，将梅尔频谱特征转换为波形
-std::vector<float> Vocoder::forward(const std::vector<float>& acoustic_features) {
-    Ort::MemoryInfo memory_info = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
-    
-    // 计算梅尔频谱图的形状
-    int64_t n_mels = 80; // MeloTTS通常使用80个梅尔频带
-    int64_t n_frames = acoustic_features.size() / n_mels;
-    
-    // 准备输入形状
-    std::vector<int64_t> features_shape = {1, n_mels, n_frames};
-    
-    // 创建输入tensor
-    Ort::Value features_input = Ort::Value::CreateTensor<float>(
-        memory_info, 
-        const_cast<float*>(acoustic_features.data()), 
-        acoustic_features.size(), 
-        features_shape.data(), 
-        features_shape.size()
-    );
-    
-    // 运行推理
-    std::vector<Ort::Value> inputs;
-    inputs.push_back(std::move(features_input));
-    
-    std::vector<const char*> input_names_ptr;
-    for (const auto& name : input_names_) {
-        input_names_ptr.push_back(name);
-    }
-    
-    std::vector<const char*> output_names_ptr;
-    for (const auto& name : output_names_) {
-        output_names_ptr.push_back(name);
+        output_names_ptr.push_back(name.c_str());
     }
     
     auto output_tensors = static_cast<Ort::Session*>(session_)->Run(
