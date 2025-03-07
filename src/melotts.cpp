@@ -207,18 +207,37 @@ public:
             throw std::runtime_error("词典未初始化");
         }
         
-        std::vector<int> phones, tones;
-        lexicon_->convert(text, phones, tones);
-        
-        if (phones.empty()) {
-            throw std::runtime_error("文本转换为音素失败");
+        if (config_.verbose) {
+            std::cout << "处理文本: '" << text << "' (语言: " << language << ")" << std::endl;
         }
         
-        // 对原始音素序列进行处理（加入空白）
-        phones = intersperse(phones, 0);
-        tones = intersperse(tones, 0);
+        std::vector<int> phones, tones;
         
-        return std::make_pair(phones, tones);
+        try {
+            // 使用词典转换文本
+            lexicon_->convert(text, phones, tones);
+            
+            if (phones.empty()) {
+                throw std::runtime_error("文本转换为音素失败: 未能生成音素序列");
+            }
+            
+            if (phones.size() != tones.size()) {
+                throw std::runtime_error("音素和声调序列长度不匹配");
+            }
+            
+            // 对原始音素序列进行处理（加入空白）
+            phones = intersperse(phones, 0);
+            tones = intersperse(tones, 0);
+            
+            if (config_.verbose) {
+                std::cout << "音素转换完成，序列长度: " << phones.size() << std::endl;
+            }
+            
+            return std::make_pair(phones, tones);
+        } catch (const std::exception& e) {
+            std::cerr << "文本转音素过程中出错: " << e.what() << std::endl;
+            throw;
+        }
     }
     
     // 中间API：音素到声学特征
@@ -335,7 +354,7 @@ private:
             // 加载词典
             std::string lexicon_file = config_.model_dir + "/lexicon.txt";
             std::string token_file = config_.model_dir + "/tokens.txt";
-            lexicon_ = std::make_unique<Lexicon>(lexicon_file, token_file);
+            lexicon_ = std::make_unique<Lexicon>(lexicon_file, token_file, config_.verbose);
             
             // 加载声学模型
             std::string encoder_file = config_.model_dir + "/encoder.onnx";
