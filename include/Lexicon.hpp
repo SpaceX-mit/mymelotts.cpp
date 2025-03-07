@@ -1,4 +1,4 @@
-// Lexicon.hpp 优化版
+// Lexicon.hpp - 优化版
 #pragma once
 
 #include <string>
@@ -10,14 +10,21 @@
 #include <sstream>
 #include <algorithm>
 #include <regex>
+#include <cctype>
 
 class Lexicon {
 public:
-    Lexicon(const std::string& lexicon_file, const std::string& token_file, bool verbose = true/*cduan*/) 
+    Lexicon(const std::string& lexicon_file, const std::string& token_file, bool verbose = true) 
         : m_verbose(verbose) {
-        loadLexicon(lexicon_file);
-        loadTokens(token_file);
-        initializePunctuations();
+        // 添加状态日志
+	m_verbose = true;
+        std::cout << "[Lexicon] Constructor - Verbose logging is " 
+                  << (m_verbose ? "enabled" : "disabled") << std::endl;
+        
+        loadTokens(token_file);    // 先加载音素表
+        loadLexicon(lexicon_file); // 再加载词典
+        initializePunctuations();  // 初始化标点符号集
+        buildToneVariants();       // 构建带声调的音素变体
     }
     
     // 将文本转换为音素ID和声调ID
@@ -25,18 +32,21 @@ public:
         phones.clear();
         tones.clear();
         
+        std::cout << "[Lexicon] convert - Verbose logging is " 
+                  << (m_verbose ? "enabled" : "disabled") << std::endl;
+
         if (m_verbose) {
             std::cout << "原始文本: " << text << std::endl;
         }
         
-        // 先进行文本规范化
+        // 文本规范化
         std::string normalized_text = normalizeText(text);
         
         if (m_verbose) {
             std::cout << "规范化文本: " << normalized_text << std::endl;
         }
         
-        // 分词处理 - 根据语言类型调用不同的分词方法
+        // 分句处理
         std::vector<std::string> sentences = splitSentence(normalized_text);
         
         if (m_verbose) {
@@ -57,7 +67,10 @@ public:
                 }
             }
             
-            for (const auto& [word, pos] : words) {
+            for (const auto& word_pair : words) {
+                const std::string& word = word_pair.first;
+                const std::string& pos = word_pair.second;
+                
                 if (word.empty()) continue;
                 
                 // 处理英文单词
@@ -77,22 +90,12 @@ public:
                         std::cout << std::endl;
                     }
                     
+                    // 处理音素列表
                     for (const auto& phoneme : phonemes) {
-                        if (m_token2id.find(phoneme) != m_token2id.end()) {
-                            phones.push_back(m_token2id[phoneme]);
-                            // 从音素中提取声调
-                            int tone = extractTone(phoneme);
-                            tones.push_back(tone);
-                        } else {
-                            std::cerr << "未知音素: " << phoneme << std::endl;
-                            if (m_token2id.find("UNK") != m_token2id.end()) {
-                                phones.push_back(m_token2id["UNK"]);
-                                tones.push_back(0);
-                            }
-                        }
+                        processPhoneme(phoneme, phones, tones);
                     }
                 } else {
-                    // 单字处理
+                    // 单字符处理
                     processCharByChar(word, phones, tones);
                 }
             }
@@ -124,7 +127,61 @@ public:
         return result;
     }
     
+    // 诊断音素映射
+    void dumpTokenMappings() const {
+        std::cout << "\n音素映射信息:" << std::endl;
+        std::cout << "基本音素数量: " << m_token2id.size() << std::endl;
+        std::cout << "音素变体数量: " << m_tone_variants.size() << std::endl;
+        
+        std::cout << "\n音素ID示例:" << std::endl;
+        int count = 0;
+        for (const auto& [token, id] : m_token2id) {
+            std::cout << token << " -> " << id << "  ";
+            if (++count % 5 == 0) std::cout << std::endl;
+            if (count >= 20) break;  // 只显示部分样例
+        }
+        
+        std::cout << "\n声调变体示例:" << std::endl;
+        count = 0;
+        for (const auto& [variant, info] : m_tone_variants) {
+            std::cout << variant << " -> " << info.first << "(" << info.second << ")  ";
+            if (++count % 3 == 0) std::cout << std::endl;
+            if (count >= 15) break;  // 只显示部分样例
+        }
+        std::cout << std::endl;
+    }
+    
 private:
+    // 处理单个音素和对应声调
+    void processPhoneme(const std::string& phoneme, std::vector<int>& phones, std::vector<int>& tones) {
+        // 先检查是否有带声调的变体
+        std::string base_phoneme = phoneme;
+        int tone = 0;
+        
+        // 如果音素末尾是数字，可能是声调标记
+        if (!phoneme.empty() && std::isdigit(phoneme.back())) {
+            base_phoneme = phoneme.substr(0, phoneme.length() - 1);
+            tone = phoneme.back() - '0';
+        }
+        
+        // 检查基础音素是否存在
+        if (m_token2id.find(base_phoneme) != m_token2id.end()) {
+            phones.push_back(m_token2id[base_phoneme]);
+            tones.push_back(tone);
+        } else if (m_token2id.find(phoneme) != m_token2id.end()) {
+            // 如果带声调的完整音素直接存在
+            phones.push_back(m_token2id[phoneme]);
+            tones.push_back(extractTone(phoneme));
+        } else {
+            // 特殊音素或未知音素
+            std::cerr << "未知音素: " << phoneme << std::endl;
+            if (m_token2id.find("UNK") != m_token2id.end()) {
+                phones.push_back(m_token2id["UNK"]);
+                tones.push_back(0);
+            }
+        }
+    }
+    
     // 文本规范化
     std::string normalizeText(const std::string& text) {
         // 去除多余空格
@@ -132,12 +189,11 @@ private:
         result = std::regex_replace(result, std::regex("\\s+"), " ");
         
         // 替换标点符号
-        // 修复Lexicon.hpp中的字符串字面量问题
         const std::unordered_map<std::string, std::string> rep_map = {
             {"：", ","}, {"；", ","}, {"，", ","}, {"。", "."}, 
             {"！", "!"}, {"？", "?"}, {"\n", "."}, {"·", ","}, 
             {"、", ","}, {"...", "…"}, {"$", "."},
-            {"\u201C", "'"}, {"\u201D", "'"}, {"\u2018", "'"}, {"\u2019", "'"},  // 修复引号字符
+            {"\u201C", "'"}, {"\u201D", "'"}, {"\u2018", "'"}, {"\u2019", "'"},  // 引号字符
             {"（", "'"}, {"）", "'"}, {"(", "'"}, {")", "'"},
             {"《", "'"}, {"》", "'"}, {"【", "'"}, {"】", "'"},
             {"[", "'"}, {"]", "'"}, {"—", "-"}, {"～", "-"},
@@ -151,9 +207,6 @@ private:
                 pos += to.length();
             }
         }
-        
-        // 识别并转换数字
-        // 简单起见，这里不做详细处理，实际应用中应使用专门的数字转换库
         
         return result;
     }
@@ -229,9 +282,6 @@ private:
     
     // 文本分词
     std::vector<std::pair<std::string, std::string>> segment(const std::string& text) {
-        // 这里应该使用更复杂的分词算法，例如集成jieba-cpp
-        // 简单起见，我们仍使用基于规则的分词方法，但增加了词性标注
-        
         std::vector<std::pair<std::string, std::string>> tokens;
         std::string word;
         
@@ -383,31 +433,28 @@ private:
     
     // 处理英文单词
     void processEnglishWord(const std::string& word, std::vector<int>& phones, std::vector<int>& tones) {
-        // 简单实现，实际应使用英文G2P转换
         if (m_verbose) {
             std::cout << "处理英文单词: " << word << std::endl;
         }
         
-        // 假设我们有英文词汇到音素的映射
+        // 先检查完整单词是否在词典中
         if (m_english_dict.find(word) != m_english_dict.end()) {
             const auto& phonemes = m_english_dict[word];
             for (const auto& ph : phonemes) {
-                if (m_token2id.find(ph) != m_token2id.end()) {
-                    phones.push_back(m_token2id[ph]);
-                    tones.push_back(0); // 英文默认声调
-                }
+                processPhoneme(ph, phones, tones);
             }
-        } else {
-            // 单字符处理
-            for (char c : word) {
-                std::string ph_str(1, c);
-                if (m_token2id.find(ph_str) != m_token2id.end()) {
-                    phones.push_back(m_token2id[ph_str]);
-                    tones.push_back(0); // 英文默认声调
-                } else if (m_token2id.find("UNK") != m_token2id.end()) {
-                    phones.push_back(m_token2id["UNK"]);
-                    tones.push_back(0);
-                }
+            return;
+        }
+        
+        // 单字符处理
+        for (char c : word) {
+            std::string ph_str(1, c);
+            if (m_token2id.find(ph_str) != m_token2id.end()) {
+                phones.push_back(m_token2id[ph_str]);
+                tones.push_back(0); // 英文默认声调
+            } else if (m_token2id.find("UNK") != m_token2id.end()) {
+                phones.push_back(m_token2id["UNK"]);
+                tones.push_back(0);
             }
         }
     }
@@ -429,17 +476,16 @@ private:
                     // 字符在词典中
                     const auto& phonemes = m_word2phonemes[char_str];
                     for (const auto& phoneme : phonemes) {
-                        if (m_token2id.find(phoneme) != m_token2id.end()) {
-                            phones.push_back(m_token2id[phoneme]);
-                            int tone = extractTone(phoneme);
-                            tones.push_back(tone);
-                        } else {
-                            std::cerr << "未知音素: " << phoneme << std::endl;
-                            if (m_token2id.find("UNK") != m_token2id.end()) {
-                                phones.push_back(m_token2id["UNK"]);
-                                tones.push_back(0);
-                            }
-                        }
+                        processPhoneme(phoneme, phones, tones);
+                    }
+                } else if (isPunctuation(char_str)) {
+                    // 标点符号 - 特殊处理
+                    if (m_token2id.find(char_str) != m_token2id.end()) {
+                        phones.push_back(m_token2id[char_str]);
+                        tones.push_back(0); // 标点默认声调
+                    } else if (m_token2id.find("UNK") != m_token2id.end()) {
+                        phones.push_back(m_token2id["UNK"]);
+                        tones.push_back(0);
                     }
                 } else {
                     // 未知字符
@@ -455,6 +501,7 @@ private:
         }
     }
     
+    // 加载词典
     void loadLexicon(const std::string& lexicon_file) {
         std::ifstream file(lexicon_file);
         if (!file.is_open()) {
@@ -488,6 +535,7 @@ private:
         std::cout << "加载词典完成，词条数: " << m_word2phonemes.size() << std::endl;
     }
     
+    // 加载音素表
     void loadTokens(const std::string& token_file) {
         std::ifstream file(token_file);
         if (!file.is_open()) {
@@ -519,6 +567,7 @@ private:
         std::cout << "加载音素表完成，音素数: " << m_token2id.size() << std::endl;
     }
     
+    // 初始化标点符号集
     void initializePunctuations() {
         const std::vector<std::string> puncts = {
             "!", "?", "…", ",", ".", "'", "-", "¿", "¡",
@@ -532,8 +581,29 @@ private:
         }
     }
     
+    // 构建音素带声调的变体映射
+    void buildToneVariants() {
+        // 为每个音素创建带声调的变体
+        for (const auto& [token, id] : m_token2id) {
+            // 跳过已经带数字的音素和特殊符号
+            if (token.empty() || std::isdigit(token.back()) || isPunctuation(token)) {
+                continue;
+            }
+            
+            // 为每个音素创建0-5声调的变体
+            for (int tone = 0; tone <= 5; tone++) {
+                std::string variant = token + std::to_string(tone);
+                m_tone_variants[variant] = std::make_pair(token, tone);
+            }
+        }
+        
+        if (m_verbose) {
+            std::cout << "构建了 " << m_tone_variants.size() << " 个音素声调变体" << std::endl;
+        }
+    }
+    
     // 获取UTF-8字符长度
-    int getCharLength(char first_byte) {
+    int getCharLength(char first_byte) const {
         if ((first_byte & 0x80) == 0) return 1;
         else if ((first_byte & 0xE0) == 0xC0) return 2;
         else if ((first_byte & 0xF0) == 0xE0) return 3;
@@ -542,10 +612,8 @@ private:
     }
     
     // 判断是否是英文单词
-    bool isEnglishWord(const std::string& word) {
-        return std::all_of(word.begin(), word.end(), [](char c) {
-            return isEnglishChar(c);
-        });
+    bool isEnglishWord(const std::string& word) const {
+        return std::all_of(word.begin(), word.end(), isEnglishChar);
     }
     
     // 判断是否是英文字符
@@ -554,34 +622,61 @@ private:
     }
     
     // 判断字符是否是标点
-    bool isPunctuation(const std::string& ch) {
+    bool isPunctuation(const std::string& ch) const {
         return m_punctuations.find(ch) != m_punctuations.end();
     }
     
     // 从音素中提取声调信息
-    int extractTone(const std::string& phoneme) {
+    int extractTone(const std::string& phoneme) const {
         if (phoneme.empty()) return 0;
         
-        // 首先检查是否有带数字的声调模式
+        // 首先检查是否在声调变体映射中
+        auto it = m_tone_variants.find(phoneme);
+        if (it != m_tone_variants.end()) {
+            return it->second.second;
+        }
+        
+        // 如果是带数字的音素，直接提取声调
         if (std::isdigit(phoneme.back())) {
             return phoneme.back() - '0';
         }
         
-        // 对于某些音素，可能有固定的声调规则
-        // 例如，标点符号可能对应特定声调
-        if (isPunctuation(phoneme)) {
-            return 0; // 标点声调
+        // 某些特殊音素的固定声调
+        const std::unordered_map<std::string, int> special_tones = {
+            {"n", 0}, {"i", 0}, {"h", 0}, {"ao", 3},
+            {"sh", 0}, {"ir", 0}, {"j", 0}, {"ie", 0},
+            // 声明更多特殊音素的声调
+        };
+        
+        auto tone_it = special_tones.find(phoneme);
+        if (tone_it != special_tones.end()) {
+            return tone_it->second;
         }
         
-        // 其他情况，返回默认声调
+        // 标点符号和其他特殊符号的声调
+        if (isPunctuation(phoneme) || phoneme == "_" || phoneme == "SP" || phoneme == "UNK") {
+            return 0;
+        }
+        
+        // 默认声调
         return 0;
     }
     
 private:
+    // 词典数据结构
     std::unordered_map<std::string, std::vector<std::string>> m_word2phonemes;
     std::unordered_map<std::string, std::vector<std::string>> m_english_dict;
+    
+    // 音素数据结构
     std::unordered_map<std::string, int> m_token2id;
     std::unordered_map<int, std::string> m_id2token;
+    
+    // 声调变体映射: tone_variant -> (base_phoneme, tone)
+    std::unordered_map<std::string, std::pair<std::string, int>> m_tone_variants;
+    
+    // 标点符号集
     std::unordered_set<std::string> m_punctuations;
+    
+    // 日志开关
     bool m_verbose;
 };

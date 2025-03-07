@@ -35,6 +35,9 @@ public:
     void set_noise_scale(float noise_scale);
     void set_config(const MeloTTSConfig& config);
 
+    // 模型诊断功能
+    void diagnoseModels();
+
 private:
     // PIMPL 实现
     std::unique_ptr<MeloTTSImpl> pimpl_;

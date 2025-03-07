@@ -39,6 +39,7 @@ int main(int argc, char* argv[]) {
     int speaker_id = 0;
     int sample_rate = 24000;
     bool verbose = true;
+    bool diagnose_mode = false;
     
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
@@ -59,7 +60,9 @@ int main(int argc, char* argv[]) {
             if (i + 1 < argc) sample_rate = std::stoi(argv[++i]);
         } else if (arg == "-v" || arg == "--verbose") {
             verbose = true;
-        } else if (arg == "-h" || arg == "--help") {
+        } else if (arg == "-d" || arg == "--diagnose") {
+            diagnose_mode = true; 
+        }else if (arg == "-h" || arg == "--help") {
             print_usage(argv[0]);
             return 0;
         } else {
@@ -94,6 +97,36 @@ int main(int argc, char* argv[]) {
         
         if (verbose) {
             std::cout << "初始化耗时: " << (end_time - start_time) << " ms" << std::endl;
+        }
+
+        // 诊断模式
+        if (diagnose_mode) {
+            std::cout << "运行模型诊断..." << std::endl;
+            tts.diagnoseModels();
+            
+            // 添加音素处理测试
+            std::cout << "\n测试基本音素处理:" << std::endl;
+            std::vector<std::string> test_cases = {
+                "你好", "世界", "测试", "Hello", "你好，世界！"
+            };
+            
+            for (const auto& test : test_cases) {
+                std::cout << "\n处理测试文本: \"" << test << "\"" << std::endl;
+                try {
+                    auto audio = tts.synthesize(test, language);
+                    std::cout << "合成成功! 音频长度: " << audio.size() << " 样本" << std::endl;
+                    
+                    // 保存诊断音频
+                    std::string test_file = "test_" + std::to_string(std::hash<std::string>{}(test)) + ".wav";
+                    if (tts.save_wav(audio, test_file)) {
+                        std::cout << "测试音频已保存到: " << test_file << std::endl;
+                    }
+                } catch (const std::exception& e) {
+                    std::cerr << "合成失败: " << e.what() << std::endl;
+                }
+            }
+            
+            return 0;
         }
         
         // 合成语音
