@@ -1,9 +1,9 @@
-
 // main.cpp - MeloTTS C++ 命令行工具
 
 #include <string>
 #include <iostream>
 #include <sys/time.h>
+#include <algorithm>
 #include "melotts.h"
 #include "MeloTTSConfig.h"
 
@@ -27,6 +27,48 @@ void print_usage(const char* program_name) {
     std::cout << "  -r, --sample-rate RATE 采样率 (默认: 24000)" << std::endl;
     std::cout << "  -v, --verbose          显示详细信息" << std::endl;
     std::cout << "  -h, --help             显示此帮助信息" << std::endl;
+}
+
+std::string sanitizeFilename(const std::string& text) {
+    std::string clean_text;
+    clean_text.reserve(text.length());
+    
+    for (size_t i = 0; i < text.length();) {
+        // Get UTF-8 character length
+        int char_len = 1;
+        unsigned char c = text[i];
+        if ((c & 0xE0) == 0xC0) char_len = 2;      // 2-byte UTF-8
+        else if ((c & 0xF0) == 0xE0) char_len = 3; // 3-byte UTF-8
+        else if ((c & 0xF8) == 0xF0) char_len = 4; // 4-byte UTF-8
+        
+        if (i + char_len <= text.length()) {
+            if (char_len > 1) {
+                // Keep UTF-8 characters as is
+                clean_text.append(text.substr(i, char_len));
+            } else {
+                // Replace non-alphanumeric ASCII with underscore
+                clean_text += std::isalnum(c) ? c : '_';
+            }
+        }
+        i += char_len;
+    }
+    return clean_text;
+}
+
+std::string makeTestFilename(const std::string& text) {
+    // Replace spaces and punctuation with underscores
+    std::string clean_text = sanitizeFilename(text);
+    
+    // Limit filename length
+    if (clean_text.length() > 20) {
+        clean_text = clean_text.substr(0, 20);
+    }
+    
+    // Add unique suffix using last 6 digits of hash
+    size_t hash_val = std::hash<std::string>{}(text);
+    std::string hash_suffix = std::to_string(hash_val).substr(0, 6);
+    
+    return "test_" + clean_text + "_" + hash_suffix + ".wav";
 }
 
 int main(int argc, char* argv[]) {
@@ -117,7 +159,7 @@ int main(int argc, char* argv[]) {
                     std::cout << "合成成功! 音频长度: " << audio.size() << " 样本" << std::endl;
                     
                     // 保存诊断音频
-                    std::string test_file = "test_" + std::to_string(std::hash<std::string>{}(test)) + ".wav";
+                    std::string test_file = makeTestFilename(test);
                     if (tts.save_wav(audio, test_file)) {
                         std::cout << "测试音频已保存到: " << test_file << std::endl;
                     }

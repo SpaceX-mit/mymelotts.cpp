@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <regex>
 #include <cctype>
+#include <cmath>
 
 class Lexicon {
 public:
@@ -20,11 +21,12 @@ public:
 	m_verbose = true;
         std::cout << "[Lexicon] Constructor - Verbose logging is " 
                   << (m_verbose ? "enabled" : "disabled") << std::endl;
-        
+
         loadTokens(token_file);    // 先加载音素表
         loadLexicon(lexicon_file); // 再加载词典
         initializePunctuations();  // 初始化标点符号集
         buildToneVariants();       // 构建带声调的音素变体
+        createPhoneticMappings();  // 创建音素映射关系
     }
     
     // 将文本转换为音素ID和声调ID
@@ -116,6 +118,9 @@ public:
             for (auto t : tones) std::cout << t << " ";
             std::cout << std::endl;
         }
+        
+        // 优化：确保音素和声调序列具有合理的长度和有效性
+        validateSequences(phones, tones);
     }
     
     // 生成交错音素序列（在每个音素之间插入blank）
@@ -152,32 +157,135 @@ public:
     }
     
 private:
-    // 处理单个音素和对应声调
+    // 处理单个音素和对应声调 - 优化版
     void processPhoneme(const std::string& phoneme, std::vector<int>& phones, std::vector<int>& tones) {
         // 先检查是否有带声调的变体
         std::string base_phoneme = phoneme;
         int tone = 0;
         
-        // 如果音素末尾是数字，可能是声调标记
+        // 如果音素末尾是数字，那是声调标记
         if (!phoneme.empty() && std::isdigit(phoneme.back())) {
             base_phoneme = phoneme.substr(0, phoneme.length() - 1);
             tone = phoneme.back() - '0';
+            
+            // 确保声调值在有效范围内
+            if (tone < 0 || tone > 5) {
+                tone = 0; // 默认声调
+            }
         }
         
         // 检查基础音素是否存在
         if (m_token2id.find(base_phoneme) != m_token2id.end()) {
             phones.push_back(m_token2id[base_phoneme]);
             tones.push_back(tone);
+            
+            if (m_verbose && tone > 0) {
+                std::cout << "识别带声调音素: " << base_phoneme << tone << std::endl;
+            }
         } else if (m_token2id.find(phoneme) != m_token2id.end()) {
-            // 如果带声调的完整音素直接存在
+            // 完整音素直接存在
             phones.push_back(m_token2id[phoneme]);
             tones.push_back(extractTone(phoneme));
         } else {
-            // 特殊音素或未知音素
-            std::cerr << "未知音素: " << phoneme << std::endl;
-            if (m_token2id.find("UNK") != m_token2id.end()) {
-                phones.push_back(m_token2id["UNK"]);
-                tones.push_back(0);
+            // 尝试音素映射
+            std::string mapped_phoneme = mapUnknownPhoneme(phoneme);
+            if (m_token2id.find(mapped_phoneme) != m_token2id.end()) {
+                phones.push_back(m_token2id[mapped_phoneme]);
+                tones.push_back(extractTone(mapped_phoneme));
+                
+                if (m_verbose) {
+                    std::cout << "映射音素: " << phoneme << " -> " << mapped_phoneme << std::endl;
+                }
+            } else {
+                std::cerr << "未知音素: " << phoneme << std::endl;
+                if (m_token2id.find("UNK") != m_token2id.end()) {
+                    phones.push_back(m_token2id["UNK"]);
+                    tones.push_back(0);
+                }
+            }
+        }
+    }
+    
+    // 创建音素映射关系
+    void createPhoneticMappings() {
+        // 中文声母韵母映射
+        m_phonetic_mappings = {
+            // 声母映射
+            {"zh", "z"}, {"ch", "c"}, {"sh", "s"},
+            {"b", "p"}, {"d", "t"}, {"g", "k"},
+            
+            // 韵母映射
+            {"iu", "iou"}, {"ui", "uei"}, {"un", "uen"},
+            {"ü", "v"}, {"üe", "ve"}, {"üan", "van"}, {"ün", "vn"},
+            
+            // 数字音素映射
+            {"3", "er"}, {"4", "ai"}, {"0", ""},
+            
+            // 常见问题处理
+            {"c3", "c"}, {"sh4", "sh"}, {"j3", "j"}, {"ie4", "ie"}
+        };
+    }
+    
+    // 映射未知音素
+    std::string mapUnknownPhoneme(const std::string& phoneme) {
+        // 检查映射表
+        auto it = m_phonetic_mappings.find(phoneme);
+        if (it != m_phonetic_mappings.end()) {
+            return it->second;
+        }
+        
+        // 如果末尾是数字，移除
+        if (!phoneme.empty() && std::isdigit(phoneme.back())) {
+            std::string base = phoneme.substr(0, phoneme.length() - 1);
+            
+            // 检查基础形式
+            it = m_phonetic_mappings.find(base);
+            if (it != m_phonetic_mappings.end()) {
+                return it->second;
+            }
+            
+            return base;
+        }
+        
+        return phoneme;
+    }
+    
+    // 验证并优化音素和声调序列
+    void validateSequences(std::vector<int>& phones, std::vector<int>& tones) {
+        // 确保两个序列长度一致
+        if (phones.size() != tones.size()) {
+            if (m_verbose) {
+                std::cout << "警告: 音素序列(" << phones.size() << ")和声调序列(" << tones.size() << ")长度不匹配，正在调整..." << std::endl;
+            }
+            
+            // 调整长度
+            size_t min_len = std::min(phones.size(), tones.size());
+            phones.resize(min_len);
+            tones.resize(min_len);
+        }
+        
+        // 确保没有无效的音素ID
+        for (size_t i = 0; i < phones.size(); ++i) {
+            if (m_id2token.find(phones[i]) == m_id2token.end()) {
+                if (m_verbose) {
+                    std::cout << "警告: 位置" << i << "的音素ID无效，替换为UNK" << std::endl;
+                }
+                phones[i] = m_token2id["UNK"];
+            }
+            
+            // 确保声调在有效范围内
+            if (tones[i] < 0 || tones[i] > 5) {
+                tones[i] = 0;
+            }
+        }
+        
+        // 确保序列不为空
+        if (phones.empty()) {
+            phones.push_back(m_token2id["UNK"]);
+            tones.push_back(0);
+            
+            if (m_verbose) {
+                std::cout << "警告: 生成空音素序列，添加UNK作为兜底" << std::endl;
             }
         }
     }
@@ -673,6 +781,9 @@ private:
     
     // 声调变体映射: tone_variant -> (base_phoneme, tone)
     std::unordered_map<std::string, std::pair<std::string, int>> m_tone_variants;
+    
+    // 音素替换映射
+    std::unordered_map<std::string, std::string> m_phonetic_mappings;
     
     // 标点符号集
     std::unordered_set<std::string> m_punctuations;

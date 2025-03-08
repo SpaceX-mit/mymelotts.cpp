@@ -1,4 +1,4 @@
-// melotts.cpp - 完整实现
+// melotts.cpp - 完整实现（优化版）
 
 // 标准库头文件
 #include <fstream>
@@ -38,10 +38,85 @@ static std::vector<int> intersperse(const std::vector<int>& lst, int item) {
     return result;
 }
 
+// 新增：特征重排序函数，正确处理特征维度转换
+static std::vector<float> reshapeFeatures(const std::vector<float>& features, 
+                                         int feature_frames, int zp_channels, int dec_len) {
+    // 创建结果缓冲区
+    std::vector<float> reshaped(zp_channels * dec_len, 0.0f);
+    
+    // 计算需要处理的帧数
+    int frames_to_process = std::min(dec_len, feature_frames);
+    
+    // 重要：理解原始特征的内存布局
+    for (int c = 0; c < zp_channels; c++) {
+        for (int f = 0; f < frames_to_process; f++) {
+            // 源索引 - 通道优先布局
+            int src_idx = c * feature_frames + f;
+            
+            // 目标索引 - [channels, frames]格式
+            int dst_idx = c * dec_len + f;
+            
+            if (src_idx < static_cast<int>(features.size())) {
+                reshaped[dst_idx] = features[src_idx];
+            }
+        }
+    }
+    
+    return reshaped;
+}
+
+// 新增：音频后处理函数，提高音质和清晰度
+static std::vector<float> postProcessAudio(const std::vector<float>& audio, int target_len, bool enhance = true) {
+    // 1. 裁剪到目标长度
+    std::vector<float> result = audio;
+    if (result.size() > static_cast<size_t>(target_len)) {
+        result.resize(target_len);
+    } else if (result.size() < static_cast<size_t>(target_len)) {
+        result.resize(target_len, 0.0f);
+    }
+    
+    if (!enhance) return result;
+    
+    // 2. 音频归一化 - 提高音量并减少失真
+    float max_amp = 0.0f;
+    for (const auto& sample : result) {
+        max_amp = std::max(max_amp, std::abs(sample));
+    }
+    
+    // 避免除以零
+    if (max_amp > 0.001f) {
+        // 设置目标振幅为0.85（提高音量但避免削波）
+        float target_amp = 0.85f;
+        float scale = target_amp / max_amp;
+        
+        for (auto& sample : result) {
+            sample *= scale;
+            
+            // 软削波以避免失真
+            if (sample > 0.95f) {
+                sample = 0.95f + 0.05f * tanh((sample - 0.95f) / 0.05f);
+            } else if (sample < -0.95f) {
+                sample = -0.95f + 0.05f * tanh((sample + 0.95f) / 0.05f);
+            }
+        }
+    }
+    
+    // 3. 简单去噪 - 移除低振幅噪声
+    const float noise_gate = 0.01f;
+    for (auto& sample : result) {
+        if (std::abs(sample) < noise_gate) {
+            sample = 0.0f;
+        }
+    }
+    
+    return result;
+}
+
 class MeloTTSImpl {
 public:
     MeloTTSImpl(const std::string& model_dir) : config_() {
         config_.model_dir = model_dir;
+        config_.enhance_audio = true; // 默认开启音频增强
         initialize();
     }
     
@@ -109,6 +184,14 @@ public:
         }
     }
     
+    // 设置音频增强开关
+    void enable_audio_enhancement(bool enable) {
+        config_.enhance_audio = enable;
+        if (config_.verbose) {
+            std::cout << "音频增强功能: " << (enable ? "已开启" : "已关闭") << std::endl;
+        }
+    }
+    
     // 主要TTS合成函数
     std::vector<float> synthesize(const std::string& text, const std::string& language) {
         if (text.empty()) {
@@ -118,6 +201,15 @@ public:
         // 设置语言
         config_.language = language;
         
+        // 优化音频质量的参数调整
+        // 暂存原始参数
+        float original_noise_scale = config_.noise_scale;
+        float original_noise_scale_w = config_.noise_scale_w;
+        
+        // 优化参数 - 降低噪声以提高清晰度
+        config_.noise_scale = 0.1f;      // 降低噪声比例，提高清晰度
+        config_.noise_scale_w = 0.3f;    // 降低音素持续时间噪声
+        
         double start, end;
         
         // 步骤1: 文本转音素
@@ -126,7 +218,7 @@ public:
             std::cout << "转换文本为音素..." << std::endl;
         }
         
-        // 修复C++17结构化绑定，替换为C++14兼容的方式
+        // 获取音素和声调序列
         auto phonemes_result = text_to_phonemes(text, language);
         auto phones = phonemes_result.first;
         auto tones = phonemes_result.second;
@@ -167,6 +259,10 @@ public:
             std::cout << "音频时长: " << audio.size() * 1.0 / config_.sample_rate << " 秒" << std::endl;
         }
         
+        // 恢复原始参数
+        config_.noise_scale = original_noise_scale;
+        config_.noise_scale_w = original_noise_scale_w;
+        
         return audio;
     }
     
@@ -183,8 +279,45 @@ public:
         }
         
         try {
+            // 检查音频质量
+            float signal_power = 0.0f;
+            float max_amp = 0.0f;
+            int zero_count = 0;
+            
+            for (const auto& sample : audio) {
+                signal_power += sample * sample;
+                max_amp = std::max(max_amp, std::abs(sample));
+                if (std::abs(sample) < 0.001f) {
+                    zero_count++;
+                }
+            }
+            
+            signal_power /= audio.size();
+            float signal_db = 10.0f * std::log10(signal_power + 1e-10f);
+            float zero_percent = 100.0f * zero_count / audio.size();
+            
+            if (config_.verbose) {
+                std::cout << "音频统计信息:" << std::endl;
+                std::cout << "  - 信号功率: " << signal_power << " (" << signal_db << " dB)" << std::endl;
+                std::cout << "  - 最大振幅: " << max_amp << std::endl;
+                std::cout << "  - 静音百分比: " << zero_percent << "%" << std::endl;
+            }
+            
+            // 处理音频 - 根据质量决定是否增强
+            std::vector<float> processed_audio;
+            
+            if (config_.enhance_audio || signal_db < -40.0f || zero_percent > 50.0f || max_amp < 0.1f) {
+                if (config_.verbose) {
+                    std::cout << "正在对音频进行增强处理..." << std::endl;
+                }
+                processed_audio = postProcessAudio(audio, audio.size(), true);
+            } else {
+                processed_audio = audio;
+            }
+            
+            // 保存处理后的音频
             AudioFile<float> audio_file;
-            std::vector<std::vector<float>> audio_data{audio};  // 单声道
+            std::vector<std::vector<float>> audio_data{processed_audio};
             audio_file.setAudioBuffer(audio_data);
             audio_file.setSampleRate(sample_rate);
             
@@ -196,7 +329,7 @@ public:
             if (config_.verbose) {
                 std::cout << "WAV文件已保存到: " << output_path << std::endl;
                 std::cout << "采样率: " << sample_rate << " Hz" << std::endl;
-                std::cout << "持续时间: " << audio.size() * 1.0 / sample_rate << " 秒" << std::endl;
+                std::cout << "持续时间: " << processed_audio.size() * 1.0 / sample_rate << " 秒" << std::endl;
             }
             
             return true;
@@ -275,7 +408,7 @@ public:
                                      config_.sdp_ratio);
             
             // 解析输出
-            // 修复:访问GetTensorMutableData前检查输出是否有效
+            // 检查输出是否有效
             if (output.size() < 3) {
                 throw std::runtime_error("声学模型输出不足，预期至少3个输出");
             }
@@ -308,7 +441,7 @@ public:
         }
     }
     
-    // 中间API：声学特征到波形
+    // 中间API：声学特征到波形 - 优化版
     std::vector<float> features_to_waveform(const std::vector<float>& features, int audio_len) {
         if (!decoder_) {
             throw std::runtime_error("声码器未初始化");
@@ -345,9 +478,6 @@ public:
                          << ", 帧长度: " << dec_len << std::endl;
             }
             
-            // 获取输出大小信息
-            int audio_slice_len = decoder_->GetOutputSize(0) / sizeof(float);
-            
             // 计算特征帧数
             int feature_frames = features.size() / zp_channels;
             int dec_slice_num = (feature_frames + dec_len - 1) / dec_len;  // 向上取整
@@ -357,42 +487,30 @@ public:
                          << ", 需要分段数: " << dec_slice_num << std::endl;
             }
             
+            // 获取输出大小信息
+            int audio_slice_len = decoder_->GetOutputSize(0) / sizeof(float);
+            
             std::vector<float> wavlist;
             wavlist.reserve(audio_len);  // 预分配内存
             
-            // 处理每个分段
+            // 逐段处理特征
             for (int i = 0; i < dec_slice_num; i++) {
-                if (config_.verbose) {
-                    std::cout << "处理段 " << (i + 1) << "/" << dec_slice_num << std::endl;
-                }
-                
-                // 计算当前段的起始帧和处理帧数
+                // 当前段的起始帧和处理帧数
                 int start_frame = i * dec_len;
                 int frames_to_process = std::min(dec_len, feature_frames - start_frame);
                 
                 if (frames_to_process <= 0) break;
                 
-                // 创建输入张量 - z_p
-                std::vector<float> zp_input(zp_batch * zp_channels * dec_len, 0.0f);
-                
-                // 复制特征数据，注意维度转换
-                for (int c = 0; c < zp_channels; c++) {
-                    for (int f = 0; f < frames_to_process; f++) {
-                        if (c * feature_frames + start_frame + f < static_cast<int>(features.size())) {
-                            // 源索引使用通道优先格式
-                            int src_idx = c * feature_frames + start_frame + f;
-                            // 目标索引 - 需要匹配声码器输入格式[batch, channels, frames]
-                            int dst_idx = c * dec_len + f;
-                            
-                            if (src_idx < static_cast<int>(features.size())) {
-                                zp_input[dst_idx] = features[src_idx];
-                            }
-                        }
-                    }
-                }
+                // 使用专用函数重整特征
+                std::vector<float> zp_slice = reshapeFeatures(
+                    features, 
+                    feature_frames, 
+                    zp_channels, 
+                    dec_len
+                );
                 
                 // 设置声码器输入
-                decoder_->SetInput(zp_input.data(), 0);
+                decoder_->SetInput(zp_slice.data(), 0);
                 decoder_->SetInput(g.data(), 1);
                 
                 // 运行推理
@@ -404,21 +522,17 @@ public:
                 std::vector<float> current_audio(audio_slice_len);
                 decoder_->GetOutput(current_audio.data(), 0);
                 
-                // 计算实际输出长度
-                int output_samples = audio_slice_len;
-                if (i == dec_slice_num - 1) {
-                    // 最后一段可能需要裁剪
-                    output_samples = audio_len - (i * audio_slice_len);
-                    if (output_samples <= 0 || output_samples > audio_slice_len) {
-                        output_samples = audio_slice_len;
-                    }
-                }
+                // 计算当前段实际输出样本数
+                int output_samples = std::min(audio_slice_len, audio_len - static_cast<int>(wavlist.size()));
                 
-                // 添加到最终结果
-                wavlist.insert(wavlist.end(), current_audio.begin(), 
+                if (output_samples <= 0) break;
+                
+                // 将当前段添加到结果
+                wavlist.insert(wavlist.end(), 
+                              current_audio.begin(), 
                               current_audio.begin() + output_samples);
                 
-                // 检查是否已经生成足够的样本
+                // 检查是否已生成足够的样本
                 if (wavlist.size() >= static_cast<size_t>(audio_len)) {
                     break;
                 }
@@ -429,12 +543,12 @@ public:
                 wavlist.resize(audio_len);
             } else if (wavlist.size() < static_cast<size_t>(audio_len)) {
                 wavlist.resize(audio_len, 0.0f);  // 填充静音
-                if (config_.verbose) {
-                    std::cout << "警告: 填充静音到预期长度" << std::endl;
-                }
             }
             
-            return wavlist;
+            // 对生成的波形进行后处理
+            std::vector<float> processed_audio = postProcessAudio(wavlist, audio_len, config_.enhance_audio);
+            
+            return processed_audio;
         } catch (const std::exception& e) {
             std::cerr << "声码器推理错误: " << e.what() << std::endl;
             throw std::runtime_error(std::string("声码器推理失败: ") + e.what());
@@ -524,31 +638,35 @@ public:
             std::cout << "  - 音素转换: " << (result.first.empty() ? "失败" : "成功") << std::endl;
             std::cout << "  - 音素数量: " << result.first.size() << std::endl;
             
-            // 测试使用音素生成声学特征
-            std::cout << "\n尝试生成声学特征..." << std::endl;
+            // 尝试综合测试生成测试音频
             try {
-                auto features = phonemes_to_features(result.first, result.second);
-                std::cout << "  - 特征生成: 成功" << std::endl;
-                std::cout << "  - 特征大小: " << features.first.size() << std::endl;
-                std::cout << "  - 预期音频长度: " << features.second << " 样本" << std::endl;
+                std::cout << "\n合成测试音频..." << std::endl;
+                // 临时开启详细日志
+                bool original_verbose = config_.verbose;
+                config_.verbose = true;
                 
-                // 测试生成波形
-                std::cout << "\n尝试生成波形..." << std::endl;
-                try {
-                    auto audio = features_to_waveform(features.first, features.second);
-                    std::cout << "  - 波形生成: 成功" << std::endl;
-                    std::cout << "  - 音频长度: " << audio.size() << " 样本" << std::endl;
-                    
-                    // 保存测试音频
-                    std::string test_file = "test_diagnostic.wav";
-                    if (save_wav(audio, test_file)) {
-                        std::cout << "  - 测试音频已保存到: " << test_file << std::endl;
-                    }
-                } catch (const std::exception& e) {
-                    std::cerr << "  - 波形生成失败: " << e.what() << std::endl;
+                // 临时优化质量参数
+                float original_noise_scale = config_.noise_scale;
+                float original_noise_scale_w = config_.noise_scale_w;
+                
+                config_.noise_scale = 0.1f;
+                config_.noise_scale_w = 0.3f;
+                
+                // 合成测试音频
+                auto audio = synthesize("这是一个测试", "zh");
+                
+                // 恢复原始参数
+                config_.verbose = original_verbose;
+                config_.noise_scale = original_noise_scale;
+                config_.noise_scale_w = original_noise_scale_w;
+                
+                // 保存测试音频
+                std::string test_file = "test_diagnostic.wav";
+                if (save_wav(audio, test_file)) {
+                    std::cout << "  - 测试音频已保存到: " << test_file << std::endl;
                 }
             } catch (const std::exception& e) {
-                std::cerr << "  - 特征生成失败: " << e.what() << std::endl;
+                std::cerr << "  - 测试音频合成失败: " << e.what() << std::endl;
             }
             
             std::cout << "\n诊断完成。" << std::endl;
@@ -686,6 +804,10 @@ void MeloTTS::set_config(const MeloTTSConfig& config) {
 
 void MeloTTS::diagnoseModels() {
     pimpl_->diagnoseModels();
+}
+
+void MeloTTS::enable_audio_enhancement(bool enable) {
+    pimpl_->enable_audio_enhancement(enable);
 }
 
 } // namespace melotts

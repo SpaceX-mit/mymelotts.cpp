@@ -55,6 +55,9 @@ struct MeloTTSConfig {
     int inter_op_num_threads = 1;           // 外部并行线程数
     bool use_deterministic_compute = false; // 是否使用确定性计算
     
+    // 添加音频增强开关
+    bool enhance_audio = true;  // 默认开启音频增强
+
     // 校验配置有效性
     bool validate() const {
         // 检查语速范围

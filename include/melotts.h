@@ -1,5 +1,5 @@
+// melotts.h - MeloTTS API接口
 
-// melotts.h - 主要接口定义
 #pragma once
 
 #include <string>
@@ -8,40 +8,49 @@
 
 namespace melotts {
 
-// 前置声明
+// 前向声明
 struct MeloTTSConfig;
 class MeloTTSImpl;
 
-// MeloTTS 主类
+// MeloTTS主类
 class MeloTTS {
 public:
-    // 构造函数和析构函数
+    // 构造函数，需要指定模型目录
     MeloTTS(const std::string& model_dir);
+    
+    // 析构函数
     ~MeloTTS();
-
-    // 禁用拷贝
-    MeloTTS(const MeloTTS&) = delete;
-    MeloTTS& operator=(const MeloTTS&) = delete;
-
-    // 主要TTS接口
+    
+    // 合成语音，返回音频波形数据
     std::vector<float> synthesize(const std::string& text, const std::string& language = "zh");
     
-    // 保存音频接口
+    // 保存为WAV文件
     bool save_wav(const std::vector<float>& audio, const std::string& output_path, int sample_rate = 0);
-
-    // 设置参数
+    
+    // 设置语速
     void set_speed(float speed);
+    
+    // 设置说话人ID
     void set_speaker_id(int speaker_id);
+    
+    // 设置噪声比例
     void set_noise_scale(float noise_scale);
+    
+    // 设置音素持续时间噪声比例
+    void set_noise_scale_w(float noise_scale_w);
+    
+    // 设置完整配置
     void set_config(const MeloTTSConfig& config);
-
+    
     // 模型诊断功能
     void diagnoseModels();
+    
+    // 设置声音质量增强开关
+    void enable_audio_enhancement(bool enable);
 
 private:
-    // PIMPL 实现
+    // PIMPL模式实现
     std::unique_ptr<MeloTTSImpl> pimpl_;
 };
 
-} // namespace melotts
-
+}
